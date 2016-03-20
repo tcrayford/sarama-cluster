@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"gopkg.in/Shopify/sarama.v1"
+	"github.com/Shopify/sarama"
 )
 
 // Consumer is a cluster group consumer
@@ -164,7 +164,7 @@ func (c *Consumer) consume() bool {
 	for {
 		select {
 		case <-hbTicker.C:
-			switch err := c.heartbeat(); err {
+			switch err := c.Heartbeat(); err {
 			case nil, sarama.ErrNoError:
 			case sarama.ErrNotCoordinatorForConsumer, sarama.ErrRebalanceInProgress:
 				return false
@@ -220,7 +220,7 @@ func (c *Consumer) release() (err error) {
 // --------------------------------------------------------------------
 
 // Performs a heartbeat, part of the mainLoop()
-func (c *Consumer) heartbeat() error {
+func (c *Consumer) Heartbeat() error {
 	broker, err := c.client.Coordinator(c.groupID)
 	if err != nil {
 		return err
