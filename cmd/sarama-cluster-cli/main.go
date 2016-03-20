@@ -9,8 +9,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/Shopify/sarama"
 	"github.com/tcrayford/sarama-cluster"
+	"gopkg.in/Shopify/sarama.v1"
 )
 
 var (
