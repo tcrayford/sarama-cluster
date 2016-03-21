@@ -247,21 +247,15 @@ func (c *Consumer) rebalance() error {
 	}
 
 	// Remember previous subscriptions
-	var notification *Notification
+	oldSubs := c.subs.Info()
 	if c.client.config.Group.Return.Notifications {
-		notification = newNotification(c.subs.Info())
+		notification := newNotification(oldSubs)
+		c.notifications <- notification
 	}
 
 	// Release subscriptions
 	if err := c.release(); err != nil {
 		return err
-	}
-
-	// Defer notification emit
-	if c.client.config.Group.Return.Notifications {
-		defer func() {
-			c.notifications <- notification
-		}()
 	}
 
 	// Re-join consumer group
@@ -292,6 +286,14 @@ func (c *Consumer) rebalance() error {
 		return err
 	}
 
+	// Update notification with new claims
+	// and emit it to the caller
+	if c.client.config.Group.Return.Notifications {
+		notification := newNotification(oldSubs)
+		notification.claim(subs)
+		c.notifications <- notification
+	}
+
 	// Create consumers
 	for topic, partitions := range subs {
 		for _, partition := range partitions {
@@ -301,11 +303,6 @@ func (c *Consumer) rebalance() error {
 				return err
 			}
 		}
-	}
-
-	// Update notification with new claims
-	if c.client.config.Group.Return.Notifications {
-		notification.claim(subs)
 	}
 
 	return nil
