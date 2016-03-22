@@ -202,9 +202,6 @@ func (c *Consumer) release() (err error) {
 		err = e
 	}
 
-	// Wait for all messages to be processed
-	time.Sleep(c.client.config.Consumer.MaxProcessingTime)
-
 	// Commit offsets
 	if e := c.commitOffsetsWithRetry(c.client.config.Group.Offsets.Retry.Max); e != nil {
 		err = e
