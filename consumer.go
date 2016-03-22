@@ -420,9 +420,6 @@ func (c *Consumer) fetchOffsets(subs map[string][]int32) (map[string]map[int32]o
 		}
 	}
 
-	// Wait for other cluster consumers to process, release and commit
-	time.Sleep(c.client.config.Consumer.MaxProcessingTime * 2)
-
 	broker, err := c.client.Coordinator(c.groupID)
 	if err != nil {
 		return nil, err
