@@ -20,7 +20,7 @@ var _ = Describe("Consumer", func() {
 			cs, err := newConsumer(group)
 			Expect(err).NotTo(HaveOccurred())
 			defer cs.Close()
-			cs.consumerID = consumerID
+			cs.ConsumerID = consumerID
 
 			for msg := range cs.Messages() {
 				out <- &testConsumerMessage{*msg, consumerID}

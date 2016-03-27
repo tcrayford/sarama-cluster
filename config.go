@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"math/rand"
+	"strconv"
 	"time"
 
 	"gopkg.in/Shopify/sarama.v1"
@@ -14,7 +16,9 @@ type Config struct {
 	Group struct {
 		// The strategy to use for the allocation of partitions to consumers (defaults to StrategyRange)
 		PartitionStrategy Strategy
-		Offsets           struct {
+		// The identity of this consumer. If nothing is set, then we use a random number.
+		ConsumerID string
+		Offsets    struct {
 			Retry struct {
 				// The numer retries when comitting offsets (defaults to 3).
 				Max int
@@ -49,6 +53,7 @@ func NewConfig() *Config {
 	c.Group.Offsets.Retry.Max = 3
 	c.Group.Session.Timeout = 30 * time.Second
 	c.Group.Heartbeat.Interval = 3 * time.Second
+	c.Group.ConsumerID = strconv.Itoa(rand.Int())
 	return c
 }
 

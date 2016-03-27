@@ -49,6 +49,7 @@ func NewConsumerFromClient(client *Client, groupID string, topics []string) (*Co
 		errors:        make(chan error, client.config.ChannelBufferSize),
 		messages:      make(chan *sarama.ConsumerMessage, client.config.ChannelBufferSize),
 		notifications: make(chan *Notification, 1),
+		consumerID:    client.config.Group.ConsumerID,
 	}
 	if err := c.client.RefreshCoordinator(groupID); err != nil {
 		return nil, err
