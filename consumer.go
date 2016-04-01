@@ -138,50 +138,114 @@ func (c *Consumer) Close() (err error) {
 }
 
 func (c *Consumer) mainLoop() {
+	defer close(c.dead)
+
 	for {
-		// rebalance
-		if err := c.rebalance(); err != nil {
-			c.handleError(err)
-			time.Sleep(c.client.config.Metadata.Retry.Backoff)
+		// Remember previous subscriptions
+		var notification *Notification
+		oldSubs := c.subs.Info()
+		if c.client.config.Group.Return.Notifications {
+			notification = newNotification(oldSubs)
+			c.notifications <- notification
+		}
+
+		// Rebalance, fetch new subscriptions
+		subs, err := c.rebalance()
+		if err != nil {
+			c.rebalanceError(err, notification)
 			continue
 		}
 
-		// enter consume state
-		if c.consume() {
-			close(c.dead)
+		// Start the heartbeat
+		hbStop, hbDone := make(chan struct{}), make(chan struct{})
+		go c.hbLoop(hbStop, hbDone)
+
+		// Subscribe to topic/partitions
+		if err := c.subscribe(subs); err != nil {
+			close(hbStop)
+			<-hbDone
+			c.rebalanceError(err, notification)
+			continue
+		}
+
+		// Start consuming and comitting offsets
+		cmStop, cmDone := make(chan struct{}), make(chan struct{})
+		go c.cmLoop(cmStop, cmDone)
+
+		// Update notification with new claims
+		if c.client.config.Group.Return.Notifications {
+			notification = newNotification(oldSubs)
+			notification.claim(subs)
+			c.notifications <- notification
+		}
+
+		// Wait for signals
+		select {
+		case <-hbDone:
+			close(cmStop)
+			<-cmDone
+		case <-cmDone:
+			close(hbStop)
+			<-hbDone
+		case <-c.dying:
+			close(cmStop)
+			<-cmDone
+			close(hbStop)
+			<-hbDone
 			return
 		}
 	}
 }
 
-// enters consume state, triggered by the mainLoop
-func (c *Consumer) consume() bool {
-	hbTicker := time.NewTicker(c.client.config.Group.Heartbeat.Interval)
-	defer hbTicker.Stop()
+// heartbeat loop, triggered by the mainLoop
+func (c *Consumer) hbLoop(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
 
-	ocTicker := time.NewTicker(c.client.config.Consumer.Offsets.CommitInterval)
-	defer ocTicker.Stop()
+	ticker := time.NewTicker(c.client.config.Group.Heartbeat.Interval)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-hbTicker.C:
-			switch err := c.Heartbeat(); err {
+		case <-ticker.C:
+			switch err := c.heartbeat(); err {
 			case nil, sarama.ErrNoError:
 			case sarama.ErrNotCoordinatorForConsumer, sarama.ErrRebalanceInProgress:
-				return false
+				return
 			default:
 				c.handleError(err)
-				return false
+				return
 			}
-		case <-ocTicker.C:
-			if err := c.commitOffsetsWithRetry(c.client.config.Group.Offsets.Retry.Max); err != nil {
-				c.handleError(err)
-				return false
-			}
-		case <-c.dying:
-			return true
+		case <-stop:
+			return
 		}
 	}
+}
+
+// commit loop, triggered by the mainLoop
+func (c *Consumer) cmLoop(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+
+	ticker := time.NewTicker(c.client.config.Consumer.Offsets.CommitInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := c.commitOffsetsWithRetry(c.client.config.Group.Offsets.Retry.Max); err != nil {
+				c.handleError(err)
+				return
+			}
+		case <-stop:
+			return
+		}
+	}
+}
+
+func (c *Consumer) rebalanceError(err error, notification *Notification) {
+	if c.client.config.Group.Return.Notifications {
+		c.notifications <- notification
+	}
+	c.handleError(err)
 }
 
 func (c *Consumer) handleError(err error) {
@@ -218,7 +282,7 @@ func (c *Consumer) release() (err error) {
 // --------------------------------------------------------------------
 
 // Performs a heartbeat, part of the mainLoop()
-func (c *Consumer) Heartbeat() error {
+func (c *Consumer) heartbeat() error {
 	broker, err := c.client.Coordinator(c.groupID)
 	if err != nil {
 		return err
@@ -236,24 +300,17 @@ func (c *Consumer) Heartbeat() error {
 }
 
 // Performs a rebalance, part of the mainLoop()
-func (c *Consumer) rebalance() error {
+func (c *Consumer) rebalance() (map[string][]int32, error) {
 	sarama.Logger.Printf("cluster/consumer %s rebalance\n", c.memberID)
 	// c.debug("^", "")
 
 	if err := c.client.RefreshCoordinator(c.groupID); err != nil {
-		return err
-	}
-
-	// Remember previous subscriptions
-	oldSubs := c.subs.Info()
-	if c.client.config.Group.Return.Notifications {
-		notification := newNotification(oldSubs)
-		c.notifications <- notification
+		return nil, err
 	}
 
 	// Release subscriptions
 	if err := c.release(); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Re-join consumer group
@@ -261,9 +318,9 @@ func (c *Consumer) rebalance() error {
 	switch {
 	case err == sarama.ErrUnknownMemberId:
 		c.memberID = ""
-		return err
+		return nil, err
 	case err != nil:
-		return err
+		return nil, err
 	}
 	// sarama.Logger.Printf("cluster/consumer %s/%d joined group %s\n", c.memberID, c.generationID, c.groupID)
 
@@ -271,25 +328,21 @@ func (c *Consumer) rebalance() error {
 	subs, err := c.syncGroup(strategy)
 	switch {
 	case err == sarama.ErrRebalanceInProgress:
-		return err
+		return nil, err
 	case err != nil:
 		_ = c.leaveGroup()
-		return err
+		return nil, err
 	}
+	return subs, nil
+}
 
-	// Fetch offsets
+// Performs the subscription, part of the mainLoop()
+func (c *Consumer) subscribe(subs map[string][]int32) error {
+	// fetch offsets
 	offsets, err := c.fetchOffsets(subs)
 	if err != nil {
 		_ = c.leaveGroup()
 		return err
-	}
-
-	// Update notification with new claims
-	// and emit it to the caller
-	if c.client.config.Group.Return.Notifications {
-		notification := newNotification(oldSubs)
-		notification.claim(subs)
-		c.notifications <- notification
 	}
 
 	// Create consumers
@@ -302,7 +355,6 @@ func (c *Consumer) rebalance() error {
 			}
 		}
 	}
-
 	return nil
 }
 
